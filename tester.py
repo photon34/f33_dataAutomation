@@ -1,71 +1,144 @@
 import os
+import re
+import argparse
+import numpy as np
 import pandas as pd
 
-def process_partners(input_path: str, output_path: str = None) -> pd.DataFrame:
+_SUFFIX = {"K": 1e3, "M": 1e6, "B": 1e9}
+
+def parse_funding(raw) -> float | np.nan:
     """
-    Reads a CSV or Excel file of partner companies, de-duplicates entries,
-    and returns a DataFrame sorted by capital (descending).
-    
-    Parameters:
-        input_path (str): Path to input .csv or .xlsx file.
-        output_path (str, optional): If provided, writes the result to this file
-                                     (.csv or .xlsx inferred by extension).
-    
-    Returns:
-        pd.DataFrame: Cleaned, unique companies with capitals sorted descending.
+    Convert a funding string like '$2.5M' or '750K' to a numeric USD amount.
+    Returns NaN for anything that cannot be parsed.
     """
-    # 1. Load data
-    _, ext = os.path.splitext(input_path.lower())
-    if ext == '.csv':
-        df = pd.read_csv(input_path)
-    elif ext in ('.xls', '.xlsx'):
-        df = pd.read_excel(input_path)
+    if pd.isna(raw):
+        return np.nan
+
+    s = (str(raw)
+         .replace(",", "")            # strip thousands separators
+         .replace("$", "")
+         .replace("€", "")
+         .replace("£", "")
+         .strip())
+
+    m = re.fullmatch(r"([\d.]+)\s*([KMB])?", s, flags=re.I)
+    if not m:
+        return np.nan
+
+    number = float(m.group(1))
+    multiplier = _SUFFIX.get(m.group(2).upper() if m.group(2) else "", 1)
+    return number * multiplier
+
+def human_funding(usd: float | np.nan) -> str:
+    """Inverse of parse_funding – format a float back to $xxM / $x.xB, etc."""
+    if pd.isna(usd):
+        return ""
+    if usd >= 1e9:
+        return f"${usd/1e9:.1f}B"
+    if usd >= 1e6:
+        return f"${usd/1e6:.0f}M" if usd % 1e6 == 0 else f"${usd/1e6:.1f}M"
+    if usd >= 1e3:
+        return f"${usd/1e3:.0f}K"
+    return f"${usd:,.0f}"
+
+# --------------------------------------------------------------------------- #
+# Core routine
+# --------------------------------------------------------------------------- #
+def top_funded_companies(
+    path: str,
+    top_n: int = 5,
+    output_path: str | None = None,
+) -> pd.DataFrame:
+    """
+    Return the `top_n` companies by RECENT funding amount.
+
+    Parameters
+    ----------
+    path : str
+        CSV or Excel file containing, at minimum,
+        'Company', 'Recent Funding Amount', 'Using cloud marketplaces?'.
+    top_n : int, default 5
+    output_path : str, optional
+        If given, write the result to this location (csv / xlsx matched by ext).
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: Company | Recent Funding Amount | Using cloud marketplace
+    """
+    # 1 | Load
+    ext = os.path.splitext(path.lower())[1]
+    if ext == ".csv":
+        df = pd.read_csv(path)
+    elif ext in (".xls", ".xlsx"):
+        df = pd.read_excel(path)
     else:
         raise ValueError(f"Unsupported input format: {ext}")
 
-    required = {'Company', 'Capital'}
+    # 2 | Check required columns (ignore capitalisation / stray spaces)
+    rename = {c: c.strip() for c in df.columns}
+    df = df.rename(columns=rename)       # normalise headings
+
+    required = {
+        "Company",
+        "Recent Funding Amount",
+        "Using cloud marketplaces?",
+    }
     if not required.issubset(df.columns):
         missing = required - set(df.columns)
-        raise KeyError(f"Missing required column(s): {', '.join(missing)}")
+        raise KeyError(f"Missing column(s): {', '.join(missing)}")
 
-    #normalize output
-    df['Company'] = df['Company'].astype(str).str.strip().str.title()
-    df['Capital'] = pd.to_numeric(df['Capital'], errors='coerce')
-    df = df.dropna(subset=['Company', 'Capital'])
+    # 3 | Clean & normalise
+    df["Company"] = df["Company"].astype(str).str.strip().str.title()
+    df["FundingUSD"] = df["Recent Funding Amount"].apply(parse_funding)
+    df = df.dropna(subset=["Company", "FundingUSD"])
 
-    #delete repetitions
-    df_unique = (
-        df
-        .groupby('Company', as_index=False)
-        .agg({'Capital': 'max'})
+    # 4 | Collapse duplicates – max single round + any-yes marketplace flag
+    agg = (
+        df.groupby("Company", as_index=False)
+          .agg(
+              FundingUSD=("FundingUSD", "max"),
+              UsingCloud=(
+                  "Using cloud marketplaces?",
+                  lambda col: "Yes" if (col.astype(str).str.lower() == "yes").any() else "No",
+              ),
+          )
+          .sort_values("FundingUSD", ascending=False)
+          .head(top_n)
     )
 
-    df_sorted = df_unique.sort_values(by='Capital', ascending=False)
+    # 5 | Prettify for output
+    agg.insert(1, "Recent Funding Amount", agg.pop("FundingUSD").apply(human_funding))
+    agg = agg.rename(columns={"UsingCloud": "Using cloud marketplace"})
 
+    # 6 | Optional write-out
     if output_path:
-        _, out_ext = os.path.splitext(output_path.lower())
-        if out_ext == '.csv':
-            df_sorted.to_csv(output_path, index=False)
-        elif out_ext in ('.xls', '.xlsx'):
-            df_sorted.to_excel(output_path, index=False)
+        out_ext = os.path.splitext(output_path.lower())[1]
+        if out_ext == ".csv":
+            agg.to_csv(output_path, index=False)
+        elif out_ext in (".xls", ".xlsx"):
+            agg.to_excel(output_path, index=False)
         else:
             raise ValueError(f"Unsupported output format: {out_ext}")
 
-    return df_sorted
+    return agg
 
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(
-        description="Generate a ranked list of unique partner companies by capital."
+        description="Show the top-funded partner companies "
+                    "and whether they sell on cloud marketplaces."
     )
-    parser.add_argument("input_file", help="Path to input CSV or Excel file")
+    parser.add_argument("input_file", help="CSV or Excel file to analyse")
+    parser.add_argument("-o", "--output", help="Write the result to this file")
     parser.add_argument(
-        "-o", "--output",
-        help="(Optional) Path to write the output ranking (CSV or Excel)."
+        "-n", "--top", type=int, default=5,
+        help="How many companies to return (default 5)"
     )
     args = parser.parse_args()
 
-    result_df = process_partners(args.input_file, args.output)
-    print("Top 10 companies by capital:")
-    print(result_df.head(10).to_string(index=False))
+    top_df = top_funded_companies(args.input_file, args.top, args.output)
+    print(f"Top {args.top} companies by recent funding:\n")
+    print(top_df.to_string(index=False))
