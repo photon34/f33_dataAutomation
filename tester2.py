@@ -17,13 +17,8 @@ _SUFFIX = {"K": 1e3, "M": 1e6, "B": 1e9}
 
 
 def _parse_funding(raw) -> float | np.nan:
-    """
-    Convert '$2.5M', '750 K', '1.2b', etc. → numeric USD.
-    Returns NaN if parsing fails.
-    """
     if pd.isna(raw):
         return np.nan
-
     text = (
         str(raw)
         .replace(",", "")
@@ -32,18 +27,15 @@ def _parse_funding(raw) -> float | np.nan:
         .replace("£", "")
         .strip()
     )
-
     m = re.fullmatch(r"([\d.]+)\s*([KMB])?", text, flags=re.I)
     if not m:
         return np.nan
-
     number = float(m.group(1))
     multiplier = _SUFFIX.get(m.group(2).upper() if m.group(2) else "", 1)
     return number * multiplier
 
 
 def _human_funding(usd: float | np.nan) -> str:
-    """Pretty format 12_500_000 → '$12.5M' (blank for NaN)."""
     if pd.isna(usd):
         return ""
     if usd >= 1e9:
@@ -63,17 +55,6 @@ def top_funded_companies(
     top_n: int = 5,
     output_path: Optional[str | Path] = None,
 ) -> pd.DataFrame:
-    """
-    Return the `top_n` companies sorted by highest *recent* funding round.
-
-    Required columns (case & whitespace ignored):
-        • Company
-        • Recent Funding Amount
-        • Using cloud marketplaces?    (Yes/No)
-
-    The output DataFrame columns:
-        Company | Recent Funding Amount | Using cloud marketplace
-    """
     path = Path(path)
     ext = path.suffix.lower()
 
@@ -83,7 +64,6 @@ def top_funded_companies(
         df = pd.read_excel(path)
     else:
         raise ValueError(f"Unsupported input format: {ext}")
-
 
     df = df.rename(columns={c: c.strip() for c in df.columns})
 
@@ -114,6 +94,7 @@ def top_funded_companies(
         .sort_values("FundingUSD", ascending=False)
         .head(top_n)
     )
+
     grouped.insert(
         1,
         "Recent Funding Amount",
@@ -135,13 +116,37 @@ def top_funded_companies(
 
 
 # --------------------------------------------------------------------------- #
-# Command-line interface
+# CLI helpers
 # --------------------------------------------------------------------------- #
 def _resolve_relative_to_script(p: Path) -> Path:
-    """Turn a relative path into one rooted beside tester.py."""
     return p if p.is_absolute() else Path(__file__).resolve().parent / p
 
 
+def _auto_find_input() -> Path:
+    """Return the single CSV/XLS(X) file in the script folder, or raise."""
+    here = Path(__file__).resolve().parent
+    candidates = sorted(
+        here.glob("*.csv") + list(here.glob("*.xls")) + list(here.glob("*.xlsx"))
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            "No .csv or .xlsx file found next to tester.py. "
+            "Pass the filename explicitly:  python tester.py myfile.csv"
+        )
+    if len(candidates) > 1:
+        names = "\n  • ".join(str(p.name) for p in candidates)
+        raise FileExistsError(
+            "Multiple data files found next to tester.py.\n"
+            "Specify which one to use, e.g.:\n"
+            "   python tester.py \"Some File.csv\"\n\n"
+            f"Files detected:\n  • {names}"
+        )
+    return candidates[0]
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -149,10 +154,13 @@ def main() -> None:
             "they sell on cloud marketplaces."
         )
     )
-    parser.add_argument("input_file", help="CSV or Excel file to analyse")
     parser.add_argument(
-        "-o", "--output", help="Write the result to this file (csv/xlsx)"
+        "input_file",
+        nargs="?",
+        help="CSV or Excel file to analyse "
+        "(if omitted, the script looks for exactly one data file beside itself)",
     )
+    parser.add_argument("-o", "--output", help="Write the result to this file")
     parser.add_argument(
         "-n",
         "--top",
@@ -162,7 +170,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    input_path = _resolve_relative_to_script(Path(args.input_file))
+    if args.input_file:
+        input_path = _resolve_relative_to_script(Path(args.input_file))
+    else:
+        input_path = _auto_find_input()  # may raise helpful error
+
     output_path = (
         _resolve_relative_to_script(Path(args.output)) if args.output else None
     )
@@ -173,9 +185,10 @@ def main() -> None:
         output_path=output_path,
     )
 
-    print(f"\nTop {args.top} companies by recent funding:\n")
+    print(f"\nUsing data file: {input_path.name}")
+    print(f"Top {args.top} companies by recent funding:\n")
     print(top_df.to_string(index=False))
-    print("")  # trailing newline for nicer shell output
+    print("")
 
 
 if __name__ == "__main__":
