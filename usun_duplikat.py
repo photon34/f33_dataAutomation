@@ -35,7 +35,6 @@ def createOutput():
             else:
                 print(f"Pominięto arkusz '{name}' – brak wymaganych kolumn.")
 
-
         joint = pd.concat(res, ignore_index=True)
         nonReps = joint.drop_duplicates(subset='Company').copy()
         nonReps['Recent Funding Amount (USD)'] = nonReps['Recent Funding Amount'].apply(cleanMoney)
@@ -53,3 +52,4 @@ def createOutput():
 
 if __name__ == '__main__':
     createOutput()
+
